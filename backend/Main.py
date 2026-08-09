@@ -15,52 +15,104 @@ from google.genai import types
 
 
 # Load environment variables
+# Local development: values are read from backend/.env
+# Cloud deployment: values are supplied by the hosting platform's environment variables.
 load_dotenv()
 
-# Get Gemini API key
+# -------------------------------------------------------------------
+# Environment configuration
+# -------------------------------------------------------------------
+
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+MONGODB_URI = os.getenv("MONGODB_URI")
+MONGODB_DB = os.getenv("MONGODB_DB", "trapveil_db")
+FRONTEND_URL = os.getenv("FRONTEND_URL", "").strip()
 
 if not GEMINI_API_KEY:
-    raise RuntimeError("GEMINI_API_KEY is not configured in .env")
+    raise RuntimeError(
+        "GEMINI_API_KEY is not configured. "
+        "Set it in backend/.env locally or in the cloud deployment environment."
+    )
 
-# Create Gemini client
+if not MONGODB_URI:
+    raise RuntimeError(
+        "MONGODB_URI is not configured. "
+        "Set your MongoDB Atlas connection string in backend/.env locally "
+        "or in the cloud deployment environment."
+    )
+
+# -------------------------------------------------------------------
+# Gemini client
+# -------------------------------------------------------------------
+
 client = genai.Client(api_key=GEMINI_API_KEY)
 
+# -------------------------------------------------------------------
+# FastAPI application
+# -------------------------------------------------------------------
 
-# Create FastAPI app
 app = FastAPI(
     title="TrapVeil API",
     description="AI-powered Digital Decision Firewall",
     version="1.0.0"
 )
-# MongoDB connection
-MONGODB_URI = os.getenv(
-    "MONGODB_URI",
-    "mongodb://localhost:27017"
-)
 
-MONGODB_DB = os.getenv(
-    "MONGODB_DB",
-    "trapveil_db"
-)
+# -------------------------------------------------------------------
+# MongoDB Atlas connection
+# -------------------------------------------------------------------
 
-mongo_client = MongoClient(MONGODB_URI)
+# Short timeouts prevent the deployed API from hanging for a long time
+# when Atlas/network configuration is incorrect.
+mongo_client = MongoClient(
+    MONGODB_URI,
+    serverSelectionTimeoutMS=10000,
+    connectTimeoutMS=10000,
+)
 
 database = mongo_client[MONGODB_DB]
-
 scan_collection = database["scan_history"]
 
 try:
     mongo_client.admin.command("ping")
     print("MongoDB connected successfully!")
 except Exception as e:
+    # Keep the API process alive so /api/health can report the problem
+    # and the deployment platform can still collect useful logs.
     print(f"MongoDB connection failed: {e}")
 
+# -------------------------------------------------------------------
+# CORS configuration
+# -------------------------------------------------------------------
+#
+# Local development:
+#   http://localhost:5173
+#   http://127.0.0.1:5173
+#   LAN addresses such as http://192.168.x.x:5173
+#
+# Production:
+#   Set FRONTEND_URL to your deployed React URL, for example:
+#   https://trapveil-frontend.example.com
+#
+# Multiple production frontend URLs can be separated by commas.
 
-# Allow React frontend to communicate with FastAPI
-# Supports localhost during development and LAN access from phones/other laptops.
+allowed_origins = [
+    origin.strip().rstrip("/")
+    for origin in FRONTEND_URL.split(",")
+    if origin.strip()
+]
+
+# Always keep local development origins available.
+allowed_origins.extend([
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+])
+
+# Remove duplicates while preserving order.
+allowed_origins = list(dict.fromkeys(allowed_origins))
+
 app.add_middleware(
     CORSMiddleware,
+    allow_origins=allowed_origins,
     allow_origin_regex=(
         r"https?://("
         r"localhost|127\.0\.0\.1|"
@@ -73,7 +125,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
 
 # Request model
 class MessageRequest(BaseModel):
@@ -162,9 +213,17 @@ def root():
 
 @app.get("/api/health")
 def health_check():
+    database_status = "connected"
+
+    try:
+        mongo_client.admin.command("ping")
+    except Exception:
+        database_status = "disconnected"
+
     return {
-        "status": "healthy",
-        "service": "TrapVeil Backend"
+        "status": "healthy" if database_status == "connected" else "degraded",
+        "service": "TrapVeil Backend",
+        "database": database_status
     }
 
 
