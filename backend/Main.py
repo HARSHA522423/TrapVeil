@@ -1,5 +1,6 @@
 import os
 import asyncio
+import time
 from typing import Literal
 from pydantic import Field
 from pymongo import MongoClient
@@ -52,6 +53,100 @@ if not MONGODB_URI:
 
 client = genai.Client(api_key=GEMINI_API_KEY)
 
+# Gemini model can be overridden in Render Environment Variables if needed.
+# Example: GEMINI_MODEL=gemini-3.6-flash
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.6-flash").strip()
+
+# Temporary Gemini 503/429 errors can happen in production during periods
+# of high demand or rate limiting. Retry a few times before returning an
+# error to the frontend.
+GEMINI_MAX_RETRIES = int(os.getenv("GEMINI_MAX_RETRIES", "3"))
+GEMINI_RETRY_BASE_SECONDS = float(os.getenv("GEMINI_RETRY_BASE_SECONDS", "2"))
+
+
+def _is_retryable_gemini_error(error: Exception) -> bool:
+    """Return True for temporary Gemini availability/rate-limit errors."""
+    message = str(error).upper()
+
+    retry_markers = (
+        "503",
+        "UNAVAILABLE",
+        "429",
+        "RESOURCE_EXHAUSTED",
+        "RATE LIMIT",
+        "TOO MANY REQUESTS",
+        "INTERNAL SERVER ERROR",
+        "500",
+    )
+
+    return any(marker in message for marker in retry_markers)
+
+
+def _gemini_error_message(error: Exception) -> str:
+    """Convert Gemini errors into a useful user-facing message."""
+    message = str(error)
+
+    if "503" in message or "UNAVAILABLE" in message.upper():
+        return (
+            "Gemini AI is temporarily unavailable because the model is "
+            "experiencing high demand. Please try again in a few seconds."
+        )
+
+    if (
+        "429" in message
+        or "RESOURCE_EXHAUSTED" in message.upper()
+        or "RATE LIMIT" in message.upper()
+        or "TOO MANY REQUESTS" in message.upper()
+    ):
+        return (
+            "Gemini AI rate limit reached. Please wait a few seconds and "
+            "try again."
+        )
+
+    return f"Gemini AI request failed: {message}"
+
+
+def generate_gemini_content(contents, config=None):
+    """
+    Call Gemini with retry/backoff for temporary 503/429/500 errors.
+
+    The same helper is used by text, structured message, and image analysis
+    so production behavior is consistent across all scanners.
+    """
+    last_error = None
+
+    for attempt in range(GEMINI_MAX_RETRIES + 1):
+        try:
+            if config is None:
+                return client.models.generate_content(
+                    model=GEMINI_MODEL,
+                    contents=contents,
+                )
+
+            return client.models.generate_content(
+                model=GEMINI_MODEL,
+                contents=contents,
+                config=config,
+            )
+
+        except Exception as error:
+            last_error = error
+
+            if attempt >= GEMINI_MAX_RETRIES or not _is_retryable_gemini_error(error):
+                raise
+
+            delay = GEMINI_RETRY_BASE_SECONDS * (2 ** attempt)
+
+            print(
+                f"Gemini temporary error (attempt {attempt + 1}/"
+                f"{GEMINI_MAX_RETRIES + 1}). "
+                f"Retrying in {delay:.1f}s: {error}"
+            )
+
+            time.sleep(delay)
+
+    raise last_error
+
 # -------------------------------------------------------------------
 # FastAPI application
 # -------------------------------------------------------------------
@@ -61,6 +156,9 @@ app = FastAPI(
     description="AI-powered Digital Decision Firewall",
     version="1.0.0"
 )
+
+print(f"TrapVeil using Gemini model: {GEMINI_MODEL}")
+print(f"Gemini retry attempts: {GEMINI_MAX_RETRIES + 1}")
 
 # -------------------------------------------------------------------
 # MongoDB Atlas connection
@@ -257,8 +355,7 @@ Explain the main warning signs if any are present.
 
     try:
 
-        response = client.models.generate_content(
-            model="gemini-3.6-flash",
+        response = generate_gemini_content(
             contents=prompt
         )
 
@@ -268,6 +365,13 @@ Explain the main warning signs if any are present.
         }
 
     except Exception as e:
+        # Return a temporary-service status for Gemini availability/rate-limit
+        # failures so the frontend can show a useful retry message.
+        if _is_retryable_gemini_error(e):
+            raise HTTPException(
+                status_code=503,
+                detail=_gemini_error_message(e)
+            )
 
         raise HTTPException(
             status_code=500,
@@ -318,8 +422,7 @@ Analyze this message:
 
     try:
 
-        response = client.models.generate_content(
-            model="gemini-3.6-flash",
+        response = generate_gemini_content(
             contents=prompt,
             config={
                 "response_mime_type": "application/json",
@@ -366,6 +469,11 @@ Analyze this message:
         }
 
     except Exception as e:
+        if _is_retryable_gemini_error(e):
+            raise HTTPException(
+                status_code=503,
+                detail=_gemini_error_message(e)
+            )
 
         raise HTTPException(
             status_code=500,
@@ -464,8 +572,7 @@ Analyze the screenshot and produce the structured TrapVeil report.
         )
 
         # Send image to Gemini Vision
-        response = client.models.generate_content(
-            model="gemini-3.6-flash",
+        response = generate_gemini_content(
             contents=[
                 image_part,
                 prompt
@@ -519,6 +626,11 @@ Analyze the screenshot and produce the structured TrapVeil report.
         }
 
     except Exception as e:
+        if _is_retryable_gemini_error(e):
+            raise HTTPException(
+                status_code=503,
+                detail=_gemini_error_message(e)
+            )
 
         raise HTTPException(
             status_code=500,
