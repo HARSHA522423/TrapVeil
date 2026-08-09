@@ -26,7 +26,12 @@ load_dotenv()
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 MONGODB_URI = os.getenv("MONGODB_URI")
 MONGODB_DB = os.getenv("MONGODB_DB", "trapveil_db")
-FRONTEND_URL = os.getenv("FRONTEND_URL", "").strip()
+# Deployed frontend URL is the default for production.
+# You can override this with FRONTEND_URL in Render or .env.
+FRONTEND_URL = os.getenv(
+    "FRONTEND_URL",
+    "https://trapveil-frontend.onrender.com",
+).strip()
 
 if not GEMINI_API_KEY:
     raise RuntimeError(
