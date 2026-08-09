@@ -82,7 +82,7 @@ function App() {
 
     try {
       const response = await fetch(
-        "http://192.168.0.100:8000/api/history"
+        "https://trapveil-backend.onrender.com/api/history"
       );
 
       const data = await response.json();
@@ -131,7 +131,7 @@ function App() {
 
     try {
       const response = await fetch(
-        "http://127.0.0.1:8000/api/analyze/message",
+        "https://trapveil-backend.onrender.com/api/analyze/message",
         {
           method: "POST",
           headers: {
@@ -220,7 +220,7 @@ function App() {
       formData.append("file", selectedImage);
 
       const response = await fetch(
-        "http://127.0.0.1:8000/api/analyze/image",
+        "https://trapveil-backend.onrender.com/api/analyze/image",
         {
           method: "POST",
           body: formData,
